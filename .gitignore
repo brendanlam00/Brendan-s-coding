@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.env
+.venv/
+.pytest_cache/
+# Your media and local state stay out of git
+inbox/
+edited/
+processed/
+reelbot.db
