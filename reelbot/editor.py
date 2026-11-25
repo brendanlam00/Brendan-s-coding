@@ -13,6 +13,7 @@ What it does to each raw clip:
 from __future__ import annotations
 
 import json
+from array import array
 import re
 import shutil
 import subprocess
@@ -32,7 +33,9 @@ class EditOptions:
     silence_db: float = -35.0      # quieter than this counts as silence
     min_silence: float = 0.5       # only cut pauses at least this long (s)
     padding: float = 0.12          # keep this much air around speech (s)
-    reframe: str = "auto"          # auto | crop | blur
+    reframe: str = "auto"          # auto | crop | blur | letterbox
+    mirror: bool = False           # flip left-right
+    cold_open: tuple[float, float] | None = None  # (start, end) in the source, shown first
     captions: bool = True
     hook: str | None = None
     hook_seconds: float = 3.0
@@ -124,6 +127,37 @@ def keep_segments(duration: float, silences: list[tuple[float, float]],
     return merged or [(0.0, duration)]
 
 
+def loudest_moment(path: Path, length: float = 3.0, skip_start: float = 0.2,
+                   sample_rate: int = 8000) -> tuple[float, float] | None:
+    """Find the most energetic `length`-second stretch (after the first 20%).
+
+    Used to pick a cold open when no transcript/AI pick is available: loud
+    usually means the punchline, the reaction, or the payoff.
+    """
+    proc = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(path),
+                           "-vn", "-ac", "1", "-ar", str(sample_rate), "-f", "s16le", "-"],
+                          capture_output=True)
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    samples = array("h")
+    samples.frombytes(proc.stdout[: len(proc.stdout) // 2 * 2])
+    hop = sample_rate // 10  # 100 ms blocks
+    energy = [sum(x * x for x in samples[i:i + hop]) / hop for i in range(0, len(samples) - hop + 1, hop)]
+    win = max(1, int(length * 10))
+    if len(energy) <= win:
+        return None
+    first = min(int(len(energy) * skip_start), len(energy) - win)
+    run = sum(energy[first:first + win])
+    best, best_i = run, first
+    for i in range(first + 1, len(energy) - win + 1):
+        run += energy[i + win - 1] - energy[i - 1]
+        if run > best:
+            best, best_i = run, i
+    if best <= 0:
+        return None
+    return best_i / 10, (best_i + win) / 10
+
+
 def _reframe_filter(info: MediaInfo, mode: str, src: str, dst: str) -> str:
     if mode == "auto":
         aspect = info.width / info.height
@@ -131,13 +165,16 @@ def _reframe_filter(info: MediaInfo, mode: str, src: str, dst: str) -> str:
     if mode == "crop":
         return (f"[{src}]scale={W}:{H}:force_original_aspect_ratio=increase,"
                 f"crop={W}:{H},setsar=1[{dst}]")
+    if mode == "letterbox":  # whole frame visible, black bars filling the rest
+        return (f"[{src}]scale={W}:{H}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+                f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[{dst}]")
     if mode == "blur":
         return (f"[{src}]split[rf_a][rf_b];"
                 f"[rf_a]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
                 f"boxblur=40:4,eq=brightness=-0.08[rf_bg];"
                 f"[rf_b]scale={W}:{H}:force_original_aspect_ratio=decrease:force_divisible_by=2[rf_fg];"
                 f"[rf_bg][rf_fg]overlay=(W-w)/2:(H-h)/2,setsar=1[{dst}]")
-    raise ValueError(f"unknown reframe mode {mode!r} (use auto, crop or blur)")
+    raise ValueError(f"unknown reframe mode {mode!r} (use auto, crop, blur or letterbox)")
 
 
 def _encode_args(crf: int, copy_audio: bool = False) -> list[str]:
@@ -180,34 +217,50 @@ def edit_video(
             total += e - s
         segments = trimmed
 
-    # 2. pass 1: cut + reframe + loudness
+    # 2. pass 1: (cold open) + cut + reframe + mirror + loudness
     parts = []
+    concat_in = ""
+    a_flag = 1 if info.has_audio else 0
+    n_cold = 0
+    if opts.cold_open:
+        cs, ce = opts.cold_open
+        cs, ce = max(0.0, cs), min(info.duration, ce)
+        if ce - cs >= 0.5:
+            n_cold = 1
+            parts.append("[1:v]fps=30,setpts=PTS-STARTPTS[vcold];")
+            concat_in += "[vcold]"
+            if a_flag:
+                parts.append("[1:a]asetpts=PTS-STARTPTS[acold];")
+                concat_in += "[acold]"
     n = len(segments)
     vsplit = f"[0:v]fps=30,split={n}" + "".join(f"[vs{i}]" for i in range(n)) + ";" if n > 1 else ""
-    asplit = ("[0:a]" + f"asplit={n}" + "".join(f"[as{i}]" for i in range(n)) + ";") if (n > 1 and info.has_audio) else ""
+    asplit = ("[0:a]" + f"asplit={n}" + "".join(f"[as{i}]" for i in range(n)) + ";") if (n > 1 and a_flag) else ""
     parts.append(vsplit + asplit)
-    concat_in = ""
     for i, (s, e) in enumerate(segments):
         vin = f"vs{i}" if n > 1 else "0:v"
         pre = "" if n > 1 else "fps=30,"
         parts.append(f"[{vin}]{pre}trim=start={s:.3f}:end={e:.3f},setpts=PTS-STARTPTS[v{i}];")
         concat_in += f"[v{i}]"
-        if info.has_audio:
+        if a_flag:
             ain = f"as{i}" if n > 1 else "0:a"
             parts.append(f"[{ain}]atrim=start={s:.3f}:end={e:.3f},asetpts=PTS-STARTPTS[a{i}];")
             concat_in += f"[a{i}]"
-    a_flag = 1 if info.has_audio else 0
-    parts.append(f"{concat_in}concat=n={n}:v=1:a={a_flag}[vcat]" + ("[acat];" if a_flag else ";"))
-    parts.append(_reframe_filter(info, opts.reframe, "vcat", "vout"))
+    parts.append(f"{concat_in}concat=n={n + n_cold}:v=1:a={a_flag}[vcat]" + ("[acat];" if a_flag else ";"))
+    parts.append(_reframe_filter(info, opts.reframe, "vcat", "vfr" if opts.mirror else "vout"))
+    if opts.mirror:
+        parts.append(";[vfr]hflip[vout]")
     if a_flag:
         parts.append(f";[acat]loudnorm=I={opts.loudness}:TP=-1.5:LRA=11,aresample=48000[aout]")
     graph = "".join(parts)
+    inputs = ["-i", str(src)]
+    if n_cold:
+        inputs += ["-ss", f"{cs:.3f}", "-to", f"{ce:.3f}", "-i", str(src)]
 
     needs_burn = bool(opts.hook) or opts.captions
     with tempfile.TemporaryDirectory(prefix="reelbot_") as tmp:
         tmpdir = Path(tmp)
         pass1 = tmpdir / "pass1.mp4" if needs_burn else dst
-        cmd = ["ffmpeg", "-hide_banner", "-y", "-i", str(src), "-filter_complex", graph,
+        cmd = ["ffmpeg", "-hide_banner", "-y", *inputs, "-filter_complex", graph,
                "-map", "[vout]"]
         if a_flag:
             cmd += ["-map", "[aout]"]

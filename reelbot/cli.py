@@ -1,7 +1,7 @@
 """reelbot command line.
 
-  reelbot edit VIDEO [-o OUT]      edit one video (no posting)
-  reelbot trial                    edit everything in inbox/ and post as Trial Reels
+  reelbot edit VIDEO               make the variations of one video (no posting)
+  reelbot trial                    make variations of everything in inbox/, post each as a Trial Reel
   reelbot stats                    refresh and show views for everything posted
   reelbot promote                  post the most-viewed finished trial to your main feed
   reelbot run                      trial + promote in one go (put this on a schedule)
@@ -17,10 +17,11 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import Config
-from .editor import EditOptions, edit_video
+from .editor import EditOptions
 from .instagram import InstagramClient
 from .pipeline import post_trials, promote, refresh_stats
 from .store import Store
+from .variants import VARIANTS, make_plan, parse_variants, render_variants
 
 
 def _edit_opts(a: argparse.Namespace) -> EditOptions:
@@ -35,7 +36,11 @@ def _add_edit_flags(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("editing")
     g.add_argument("--no-cut", action="store_true", help="don't cut out pauses")
     g.add_argument("--no-captions", action="store_true", help="don't burn in captions")
-    g.add_argument("--reframe", choices=["auto", "crop", "blur"], default="auto")
+    g.add_argument("--variants", help=f"comma list from: {', '.join(VARIANTS)} "
+                   "(default: REELBOT_VARIANTS or letterbox,mirror,hook)")
+    g.add_argument("--no-ai", action="store_true", help="don't ask Claude for hooks / cold open")
+    g.add_argument("--reframe", choices=["auto", "crop", "blur"], default="auto",
+                   help="framing for the full-screen variations")
     g.add_argument("--hook", help="text shown at the top for the first 3s")
     g.add_argument("--max-seconds", type=float, help="cap the edited length")
     g.add_argument("--whisper-model", default="small", help="tiny/base/small/medium")
@@ -48,19 +53,29 @@ def _client(cfg: Config) -> InstagramClient:
     return InstagramClient(cfg.access_token, cfg.ig_user_id, cfg.api_version)
 
 
+def _variants(a, cfg) -> list[str]:
+    return parse_variants(a.variants or cfg.variants)
+
+
+def _use_ai(a, cfg) -> bool:
+    return cfg.ai_hooks and not a.no_ai
+
+
 def cmd_edit(a, cfg):
     src = Path(a.video)
-    out = Path(a.output) if a.output else cfg.edited / f"{src.stem}.mp4"
-    res = edit_video(src, out, _edit_opts(a))
-    print(f"{out}  ({res.source_duration:.1f}s -> {res.output_duration:.1f}s, {res.cuts} cuts, "
-          f"captions={'yes' if res.captioned else 'no'})")
-    for n in res.notes:
-        print(f"note: {n}")
+    variants = _variants(a, cfg)
+    opts = _edit_opts(a)
+    plan = make_plan(src, variants, _use_ai(a, cfg), opts.whisper_model)
+    for n in plan.notes:
+        print(n)
+    out_dir = Path(a.output) if a.output else cfg.edited
+    render_variants(src, out_dir, variants, opts, plan)
 
 
 def cmd_trial(a, cfg):
     client = None if a.dry_run else _client(cfg)
-    post_trials(cfg, Store(cfg.db_path), client, _edit_opts(a), limit=a.limit, dry_run=a.dry_run)
+    post_trials(cfg, Store(cfg.db_path), client, _edit_opts(a), limit=a.limit, dry_run=a.dry_run,
+                variants=_variants(a, cfg), use_ai=_use_ai(a, cfg))
 
 
 def cmd_stats(a, cfg):
@@ -76,7 +91,8 @@ def cmd_stats(a, cfg):
     for p in posts:
         when = datetime.fromtimestamp(p.posted_at).strftime("%m-%d")
         print(f"{p.id:>3}  {p.kind:5}  {p.status:7}  {p.age_hours:>4.0f}h  {p.views:>8}  "
-              f"{p.likes:>6}  {p.shares:>6}  {p.saved:>5}  {p.source_name} ({when})")
+              f"{p.likes:>6}  {p.shares:>6}  {p.saved:>5}  {p.source_name}"
+              + (f" [{p.variant}]" if p.variant else "") + f" ({when})")
 
 
 def cmd_promote(a, cfg):
@@ -86,7 +102,8 @@ def cmd_promote(a, cfg):
 def cmd_run(a, cfg):
     client = _client(cfg)
     store = Store(cfg.db_path)
-    post_trials(cfg, store, client, _edit_opts(a), limit=a.limit)
+    post_trials(cfg, store, client, _edit_opts(a), limit=a.limit,
+                variants=_variants(a, cfg), use_ai=_use_ai(a, cfg))
     promote(cfg, store, client, force=a.force)
 
 
@@ -115,9 +132,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--env", default=".env", help="path to .env file")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("edit", help="edit one video without posting")
+    p = sub.add_parser("edit", help="make the variations of one video without posting")
     p.add_argument("video")
-    p.add_argument("-o", "--output")
+    p.add_argument("-o", "--output", help="folder for the edited files (default: edited/)")
     _add_edit_flags(p)
     p.set_defaults(fn=cmd_edit)
 

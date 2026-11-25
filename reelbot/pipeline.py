@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import shutil
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 from .config import Config
-from .editor import EditOptions, edit_video
+from .captions import transcribe
+from .editor import EditOptions
 from .instagram import InstagramClient, InstagramError
 from .store import Post, Store
+from .variants import make_plan, parse_variants, render_variants
 
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi"}
 
@@ -32,19 +33,6 @@ def caption_for(video: Path, cfg: Config) -> str:
     return sidecar_text(video, ".txt") or cfg.default_caption
 
 
-def edit_one(video: Path, cfg: Config, opts: EditOptions, log: Log = print) -> Path:
-    hook = sidecar_text(video, ".hook.txt")
-    local = EditOptions(**{**opts.__dict__, "hook": opts.hook or hook})
-    out = cfg.edited / f"{video.stem}.mp4"
-    log(f"Editing {video.name} ...")
-    res = edit_video(video, out, local)
-    log(f"  -> {out}  ({res.source_duration:.1f}s -> {res.output_duration:.1f}s, "
-        f"{res.cuts} cuts, captions={'yes' if res.captioned else 'no'})")
-    for note in res.notes:
-        log(f"  note: {note}")
-    return out
-
-
 def _archive(video: Path, processed: Path) -> None:
     processed.mkdir(parents=True, exist_ok=True)
     for p in video.parent.glob(video.stem + "*"):
@@ -53,32 +41,50 @@ def _archive(video: Path, processed: Path) -> None:
 
 
 def post_trials(cfg: Config, store: Store, client: InstagramClient | None, opts: EditOptions,
-                limit: int | None = None, dry_run: bool = False, log: Log = print) -> list[int]:
-    """Edit every video in the inbox and publish each one as a Trial Reel."""
+                limit: int | None = None, dry_run: bool = False, log: Log = print,
+                variants: list[str] | None = None, use_ai: bool | None = None,
+                transcriber=transcribe, planner=None) -> list[int]:
+    """Make several variations of every inbox video and post each as its own Trial Reel."""
+    variants = variants or parse_variants(cfg.variants)
+    use_ai = cfg.ai_hooks if use_ai is None else use_ai
     videos = find_new_videos(cfg.inbox)[: limit or None]
     if not videos:
         log(f"No new videos in {cfg.inbox}/")
         return []
     ids = []
     for video in videos:
-        edited = edit_one(video, cfg, opts, log)
-        caption = caption_for(video, cfg)
+        log(f"{video.name}: making {len(variants)} variations ({', '.join(variants)})")
+        plan = make_plan(video, variants, use_ai, opts.whisper_model, transcriber, planner)
+        for note in plan.notes:
+            log(f"  {note}")
+        caption = sidecar_text(video, ".txt") or plan.caption or cfg.default_caption
+        already = {p.variant for p in store.posts(kind="trial") if p.source_name == video.name}
+        todo = [v for v in variants if v not in already]
+        if already & set(variants):
+            log(f"  already posted: {', '.join(sorted(already & set(variants)))}")
+        rendered = render_variants(video, cfg.edited, todo, opts, plan, log, transcriber)
         if dry_run:
-            log(f"  [dry run] would post as Trial Reel with caption: {caption[:80]!r}")
+            log(f"  [dry run] would post {len(rendered)} Trial Reels with caption: {caption[:80]!r}")
             continue
         assert client is not None
-        log(f"  Uploading {edited.name} as a Trial Reel ({cfg.graduation}) ...")
-        try:
-            pub = client.publish_reel(edited, caption, trial_graduation=cfg.graduation)
-        except InstagramError as exc:
-            log(f"  FAILED: {exc}  (left {video.name} in the inbox to retry)")
-            continue
-        pid = store.add(source_name=video.name, edited_path=str(edited), caption=caption,
-                        kind="trial", status="testing", media_id=pub.media_id,
-                        permalink=pub.permalink)
-        ids.append(pid)
-        _archive(video, cfg.processed)
-        log(f"  Posted trial #{pid}: {pub.permalink or pub.media_id}")
+        failed = False
+        for name, path, _ in rendered:
+            log(f"  [{name}] uploading as a Trial Reel ...")
+            try:
+                pub = client.publish_reel(path, caption, trial_graduation=cfg.graduation)
+            except InstagramError as exc:
+                log(f"  [{name}] FAILED: {exc}")
+                failed = True
+                continue
+            pid = store.add(source_name=video.name, edited_path=str(path), caption=caption,
+                            kind="trial", status="testing", media_id=pub.media_id,
+                            permalink=pub.permalink, variant=name)
+            ids.append(pid)
+            log(f"  [{name}] posted trial #{pid}: {pub.permalink or pub.media_id}")
+        if failed:
+            log(f"  Left {video.name} in the inbox; the next run retries only the failed variations.")
+        else:
+            _archive(video, cfg.processed)
     return ids
 
 
@@ -127,7 +133,8 @@ def promote(cfg: Config, store: Store, client: InstagramClient, dry_run: bool = 
     log("Trial results:")
     for t in sorted(judged, key=_score, reverse=True):
         mark = "  <- WINNER" if winner and t.id == winner.id else ""
-        log(f"  {t.views:>8} views  {t.likes:>6} likes  {t.shares:>5} shares  {t.source_name}{mark}")
+        label = f"{t.source_name} [{t.variant}]" if t.variant else t.source_name
+        log(f"  {t.views:>8} views  {t.likes:>6} likes  {t.shares:>5} shares  {label}{mark}")
 
     if winner is None:
         log(f"No trial reached {cfg.min_views} views; nothing promoted this round.")
@@ -137,16 +144,16 @@ def promote(cfg: Config, store: Store, client: InstagramClient, dry_run: bool = 
         return None
 
     if dry_run:
-        log(f"[dry run] would post {winner.source_name} to the main feed.")
+        log(f"[dry run] would post {winner.source_name} [{winner.variant}] to the main feed as a new post.")
         return winner
 
     if not Path(winner.edited_path).is_file():
         raise SystemExit(f"Edited file for the winner is missing: {winner.edited_path}")
-    log(f"Posting {winner.source_name} to your main feed ...")
+    log(f"Posting {winner.source_name} [{winner.variant}] to your main feed as a new post ...")
     pub = client.publish_reel(Path(winner.edited_path), winner.caption, trial_graduation=None)
     store.add(source_name=winner.source_name, edited_path=winner.edited_path,
               caption=winner.caption, kind="main", status="live", media_id=pub.media_id,
-              permalink=pub.permalink)
+              permalink=pub.permalink, variant=winner.variant)
     store.set_status(winner.id, "winner", promoted_media_id=pub.media_id)
     for t in judged:
         if t.id != winner.id:

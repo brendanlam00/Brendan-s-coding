@@ -2,13 +2,20 @@
 
 Drop your raw videos in a folder. reelbot then:
 
-1. **Edits them.** It cuts dead air and pauses, reframes the video to vertical 9:16 (1080×1920), sets loudness to Instagram's level, burns in big word-by-word captions, and can show a hook line at the top for the first 3 seconds.
-2. **Posts each one as a Trial Reel.** Trial Reels are shown to non-followers first, so a flop doesn't hurt your main page.
-3. **Tracks views** on every trial through the official Instagram API.
-4. **Posts the most-viewed trial to your main feed** once the trials have had time to run (48 hours by default).
+1. **Makes 3 variations of each video** and edits all of them:
+   - **letterbox**: horizontal, with black bars above and below
+   - **mirror**: flipped left to right
+   - **hook**: a new first few seconds, with the strongest moment moved to the front
+
+   Each variation gets its own hook line. Every version also gets pauses cut out, levelled sound, captions, and Instagram-ready export.
+2. **Posts every variation as a Trial Reel.** Trial Reels are shown to non-followers first, so testing never hurts your main page.
+3. **Tracks the views** of every trial.
+4. **After 24–48 hours, posts the best performer to your main feed as a brand-new post.** It's a fresh upload, not a "share" or a repost, so it reaches a new audience again.
 
 ```
-inbox/  ──edit──▶  edited/  ──post as Trial Reels──▶  wait 48h  ──▶  top views ──▶ main feed
+inbox/clip.mp4 ─┬─ letterbox ─┐
+                ├─ mirror ────┼─ Trial Reels ─ wait 24-48h ─ most views ─▶ NEW post on main feed
+                └─ hook ──────┘
 ```
 
 ---
@@ -71,7 +78,9 @@ Put raw clips in `inbox/`. For each video you can add optional text files with t
 |---|---|
 | `inbox/gym-tip.mp4` | the raw video |
 | `inbox/gym-tip.txt` | the post caption and hashtags (if missing, `REELBOT_DEFAULT_CAPTION` is used) |
-| `inbox/gym-tip.hook.txt` | hook text shown at the top for the first 3s, e.g. `Stop doing this at the gym` |
+| `inbox/gym-tip.hook.txt` | hook lines, **one per line**: line 1 goes on the letterbox version, line 2 on the mirror version, line 3 on the hook version |
+
+If there's no `.hook.txt`, Claude writes the hooks for you (see *Claude-written hooks* below). If that isn't set up either, the videos go out without hook text.
 
 Then:
 
@@ -89,9 +98,31 @@ Posted raw files move to `processed/`. Edited files stay in `edited/` because th
 ### Edit one video without posting
 
 ```bash
-reelbot edit my-clip.mov --hook "3 things I wish I knew"
-reelbot edit my-clip.mov --no-captions --reframe crop --max-seconds 60
+reelbot edit my-clip.mov                               # makes edited/my-clip__letterbox.mp4, __mirror, __hook
+reelbot edit my-clip.mov --variants main,mirror
+reelbot edit my-clip.mov --hook "3 things I wish I knew" --no-captions
 ```
+
+### Variations
+
+| Name | What it does |
+|---|---|
+| `letterbox` | keeps the whole frame, horizontal, with black bars above and below; the hook sits in the top bar |
+| `mirror` | flips the video left to right (text and captions are *not* flipped) |
+| `hook` | new opening: the most gripping 1.5–4s moment plays first, then the full video |
+| `main` | the standard full-screen vertical edit |
+
+The default is `letterbox,mirror,hook`. Change it with `REELBOT_VARIANTS` in `.env`, or `--variants` on a single run.
+
+### Claude-written hooks (optional)
+
+If you set this up, Claude reads each video's transcript and writes a different hook line for every variation. It also picks the moment to use as the cold open for the `hook` variation and writes a caption if you didn't give one. Setup:
+
+1. Install the extras (needs Python 3.10+; on a Mac: `brew install python`, then rerun `bash install.sh`):
+   `pip install -e ".[captions,ai]"`
+2. Add your Anthropic API key to `.env`: `ANTHROPIC_API_KEY=...` (get one at console.anthropic.com).
+
+Without this, reelbot uses your `.hook.txt` lines and picks the loudest moment as the cold open.
 
 Editing options (these also work on `trial` and `run`):
 
@@ -108,7 +139,7 @@ Editing options (these also work on `trial` and `run`):
 
 ### How the winner is picked
 
-Each `promote` run looks at every trial that has been live for at least `REELBOT_TRIAL_HOURS` (default 48). It takes the one with the **most views**; ties go to the one with more shares and saves. That one is reposted to your main feed as a regular Reel with the same caption. The other trials in that round are marked `passed` and never promoted. Trials that are still young keep running for the next round.
+Each `promote` run looks at every trial (every variation of every video) that has been live for at least `REELBOT_TRIAL_HOURS` (default 48; set it to 24 if you prefer). It takes the one with the **most views**; ties go to the one with more shares and saves. That exact version is uploaded to your main feed as a **new post** with the same caption. The other trials in that round are marked `passed` and never promoted. Trials that are still young keep running for the next round.
 
 Set `REELBOT_MIN_VIEWS` (e.g. `1000`) if you only want to promote trials that clear a minimum.
 
@@ -126,11 +157,10 @@ Your videos live on your computer, so the schedule runs there too.
 
 ## Things to know
 
-- **About "share to followers":** Instagram's API can publish Trial Reels, but it **can't** press the in-app "Share to followers" button. So reelbot puts the winner on your main feed by **posting it again as a regular Reel**. The original trial stays up for non-followers. If you'd rather use Instagram's built-in sharing, you have two options:
-  - set `REELBOT_GRADUATION=SS_PERFORMANCE`, and Instagram automatically shares trials that perform well to your followers (reelbot then won't repost), or
-  - run `reelbot promote --dry-run` to see the winner, then tap *Share to followers* on it yourself in the app.
+- **Why a new post instead of "Share to followers":** a fresh upload counts as a new post, so it gets pushed to a new audience again ("more eyes"). Instagram's API can't press "Share to followers" anyway. If you'd rather let Instagram share winners itself, set `REELBOT_GRADUATION=SS_PERFORMANCE`; reelbot then won't post anything to the main feed.
+- **Daily limits:** each video uses 3 trial posts. Instagram limits how many posts an app can publish per day, and third-party guides report a lower cap for Trial Reels (around 20 a day). Post about 5 videos a day or fewer.
 - **Trial Reels have to be enabled on your account.** If Instagram rejects the trial post, check that your Professional account has Trial Reels in the app (it isn't available to every account yet).
-- **Limits:** Instagram caps how many posts an app can publish per 24 hours. `reelbot check` shows how much you've used. Reels must be 3 seconds to 15 minutes long and under 300 MB; reelbot's output meets the format requirements.
+- **Format:** `reelbot check` shows how many API posts you have left today. Reels must be 3 seconds to 15 minutes long and under 300 MB; reelbot's output meets the format requirements.
 - The upload uses Instagram's resumable upload, so videos go straight from your computer to Instagram with no file hosting needed. This upload method requires the Facebook-login setup described above.
 
 ## Development

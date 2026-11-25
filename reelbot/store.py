@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS posts (
     shares INTEGER NOT NULL DEFAULT 0,
     saved INTEGER NOT NULL DEFAULT 0,
     stats_at REAL,
-    promoted_media_id TEXT
+    promoted_media_id TEXT,
+    variant TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -51,6 +52,7 @@ class Post:
     saved: int
     stats_at: float | None
     promoted_media_id: str | None
+    variant: str = ""
 
     @property
     def age_hours(self) -> float:
@@ -62,15 +64,19 @@ class Store:
         self.db = sqlite3.connect(str(path))
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(posts)")}
+        if "variant" not in cols:  # upgrade databases from before variations existed
+            self.db.execute("ALTER TABLE posts ADD COLUMN variant TEXT NOT NULL DEFAULT ''")
+            self.db.commit()
 
     def add(self, *, source_name: str, edited_path: str, caption: str, kind: str,
             status: str, media_id: str | None, permalink: str | None,
-            posted_at: float | None = None) -> int:
+            posted_at: float | None = None, variant: str = "") -> int:
         cur = self.db.execute(
             "INSERT INTO posts (source_name, edited_path, caption, kind, status, media_id,"
-            " permalink, posted_at) VALUES (?,?,?,?,?,?,?,?)",
+            " permalink, posted_at, variant) VALUES (?,?,?,?,?,?,?,?,?)",
             (source_name, edited_path, caption, kind, status, media_id, permalink,
-             posted_at if posted_at is not None else time.time()),
+             posted_at if posted_at is not None else time.time(), variant),
         )
         self.db.commit()
         return cur.lastrowid

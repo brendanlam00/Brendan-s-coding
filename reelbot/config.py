@@ -35,6 +35,8 @@ class Config:
     trial_hours: float = 48.0
     min_views: int = 0
     default_caption: str = ""
+    variants: str = "letterbox,mirror,hook"
+    ai_hooks: bool = True
 
     @classmethod
     def from_env(cls, env_file: str | Path = ".env") -> "Config":
@@ -55,6 +57,8 @@ class Config:
             trial_hours=float(e("REELBOT_TRIAL_HOURS", "48")),
             min_views=int(e("REELBOT_MIN_VIEWS", "0")),
             default_caption=e("REELBOT_DEFAULT_CAPTION", ""),
+            variants=e("REELBOT_VARIANTS", "letterbox,mirror,hook"),
+            ai_hooks=e("REELBOT_AI_HOOKS", "on").strip().lower() not in {"off", "0", "false", "no"},
         )
 
     def require_credentials(self) -> None:
