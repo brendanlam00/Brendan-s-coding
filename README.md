@@ -15,16 +15,20 @@ inbox/  ──edit──▶  edited/  ──post as Trial Reels──▶  wait 4
 
 ## 1. Install
 
-You need Python 3.10+ and [ffmpeg](https://ffmpeg.org/download.html):
-
-- **Mac:** `brew install ffmpeg`
-- **Windows:** `winget install ffmpeg`
-
-Then:
+**Mac (easiest):** download this folder, open Terminal in it, and run:
 
 ```bash
-git clone https://github.com/brendanlam00/Brendan-s-coding.git
-cd Brendan-s-coding
+bash install.sh
+source .venv/bin/activate
+```
+
+The installer works with the Mac's built-in Python. It sets up an environment in `.venv` and installs reelbot, and it tells you if ffmpeg is missing. Video editing needs ffmpeg: `brew install ffmpeg`.
+
+**Manual install (any OS):** you need Python 3.9+ and [ffmpeg](https://ffmpeg.org/download.html):
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 pip install -e ".[captions]"
 ```
 
