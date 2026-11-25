@@ -36,20 +36,24 @@ Instagram only allows posting through its official API. You need these:
 
 1. **A Professional account.** In the Instagram app, go to Settings → Account type → switch to **Creator** or **Business**. Then **link it to a Facebook Page** (Settings → Accounts Center, or from the Page's settings).
 2. **A Meta app.** Go to [developers.facebook.com/apps](https://developers.facebook.com/apps) → *Create app* → choose **Business** → add the **Instagram** product → pick **API setup with Facebook login**. You can leave the app in Development mode. Because you're the app's admin, it can post to your own account without going through App Review.
-3. **An access token.** Open the [Graph API Explorer](https://developers.facebook.com/tools/explorer/), select your app, and add these permissions:
+3. **Generate a token.** Open the [Graph API Explorer](https://developers.facebook.com/tools/explorer/). Choose your app under **Meta App**, then **Get User Access Token**. Add these permissions:
    `instagram_basic`, `instagram_content_publish`, `instagram_manage_insights`, `pages_show_list`, `pages_read_engagement`, `business_management`.
-   Click **Generate Access Token** and approve.
-4. **Make the token long-lived.** Paste it into the [Access Token Debugger](https://developers.facebook.com/tools/debug/accesstoken/) and click **Extend Access Token**. The extended token lasts about 60 days, so set a reminder to renew it.
-5. **Find your Instagram user ID.** In the Graph API Explorer, run
-   `me/accounts?fields=name,instagram_business_account`
-   The `instagram_business_account.id` number is your `IG_USER_ID`.
-
-Then:
+   Click **Generate Access Token**, tick your Page and Instagram account in the popup, and copy the token.
+4. **Get your App ID and App Secret.** In your app, go to **App settings → Basic** (click **Show** next to App Secret).
+5. **Run setup:**
 
 ```bash
-cp .env.example .env      # open .env and paste IG_ACCESS_TOKEN and IG_USER_ID
-reelbot check             # should print "Connected to @yourhandle"
+reelbot setup
 ```
+
+Paste the token, App ID and App Secret when it asks. Your typing is hidden. Setup then:
+- checks that the token has all the permissions,
+- extends it to about 60 days,
+- finds your Instagram account ID,
+- writes everything to `.env`,
+- runs `reelbot check`.
+
+When the token expires (about 60 days), redo steps 3 and 5.
 
 `.env` is in `.gitignore`. Never commit it or share your token.
 

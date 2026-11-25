@@ -6,6 +6,7 @@
   reelbot promote                  post the most-viewed finished trial to your main feed
   reelbot run                      trial + promote in one go (put this on a schedule)
   reelbot check                    verify your Instagram credentials
+  reelbot setup                    connect your Instagram (writes .env for you)
 """
 
 from __future__ import annotations
@@ -102,6 +103,12 @@ def cmd_check(a, cfg):
         print(f"(couldn't read publishing quota: {exc})")
 
 
+def cmd_setup(a, cfg):
+    from .setup import run_setup
+    if run_setup(Path(a.env), cfg.api_version):
+        cmd_check(a, Config.from_env(a.env))
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="reelbot", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -134,6 +141,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true")
     _add_edit_flags(p)
     p.set_defaults(fn=cmd_run)
+
+    p = sub.add_parser("setup", help="connect your Instagram account (writes .env)")
+    p.set_defaults(fn=cmd_setup)
 
     p = sub.add_parser("check", help="verify Instagram credentials")
     p.set_defaults(fn=cmd_check)
